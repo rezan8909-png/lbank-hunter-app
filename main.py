@@ -1,6 +1,6 @@
 import flet as ft
-import ccxt
-import pandas as pd
+import urllib.request
+import json
 import threading
 import time
 
@@ -13,11 +13,6 @@ class PriceHunterApp:
         self.page.scroll = ft.ScrollMode.AUTO
         
         self.min_change = 50.0
-        self.exchange = ccxt.lbank({
-            'enableRateLimit': True,
-            'timeout': 30000,
-            'options': {'defaultType': 'swap'}
-        })
         self.is_scanning = False
         
         self.setup_ui()
@@ -65,57 +60,71 @@ class PriceHunterApp:
         
         threading.Thread(target=self.run_scan, daemon=True).start()
 
-    def fetch_ohlcv(self, symbol):
-        try:
-            clean_symbol = symbol.replace(':USDT', '')
-            return self.exchange.fetch_ohlcv(clean_symbol, '1h', limit=24)
-        except:
-            return []
+    def http_get(self, url):
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            return json.loads(response.read().decode('utf-8'))
+
+    def fetch_tickers(self):
+        # دریافت اطلاعات ۲۴ ساعته تمام ارزهای فیوچرز LBank
+        url = "https://lbkperp.lbank.com/cfd/openApi/v1/pub/marketData"
+        data = self.http_get(url)
+        if data.get("result") == "true" or data.get("data"):
+            return data.get("data", [])
+        return []
 
     def run_scan(self):
         try:
             self.min_change = float(self.threshold_input.value or 50)
-            self.status_text.value = "در حال دریافت نمادها از LBank..."
+            self.status_text.value = "در حال دریافت بازارها از LBank..."
             self.page.update()
             
-            markets = self.exchange.load_markets()
-            symbols = [s for s, m in markets.items() if m.get('type') == 'swap' and m.get('active', False) and ('/USDT' in s or ':USDT' in s)]
-            
-            total = len(symbols)
+            tickers = self.fetch_tickers()
+            if not tickers:
+                # تلاش با اندپوینت عمومی جایگزین
+                url_alt = "https://api.lbkex.com/v2/supplement/ticker/24hr.do"
+                alt_data = self.http_get(url_alt)
+                tickers = alt_data.get("data", [])
+
+            total = len(tickers)
             results = []
             
-            for i, sym in enumerate(symbols):
-                self.progress_bar.value = (i + 1) / total
+            for i, item in enumerate(tickers):
+                self.progress_bar.value = (i + 1) / total if total > 0 else 0
+                sym = item.get("instrumentId") or item.get("symbol", "")
+                
+                # فیلتر جفت ارزهای تتر
+                if "USDT" not in sym.upper():
+                    continue
+
                 self.status_text.value = f"بررسی {i+1}/{total}: {sym}"
                 self.page.update()
                 
-                ohlcv = self.fetch_ohlcv(sym)
-                if len(ohlcv) >= 20:
-                    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                    p_open = df['open'].iloc[0]
-                    p_close = df['close'].iloc[-1]
-                    high_24h = df['high'].max()
-                    low_24h = df['low'].min()
+                try:
+                    # درصد تغییر و قیمت
+                    change = float(item.get("priceChangePercent") or item.get("change") or 0.0)
+                    price = float(item.get("lastPrice") or item.get("latestPrice") or item.get("price") or 0.0)
+                    high = float(item.get("highPrice") or item.get("high") or price)
+                    low = float(item.get("lowPrice") or item.get("low") or price)
                     
-                    change = ((p_close - p_open) / p_open) * 100
-                    volatility = ((high_24h - low_24h) / low_24h) * 100
-                    
+                    volatility = round(((high - low) / low) * 100, 2) if low > 0 else 0.0
+
                     if abs(change) >= self.min_change:
-                        item = {
-                            'symbol': sym,
+                        card_data = {
+                            'symbol': sym.upper(),
                             'change': round(change, 2),
-                            'volatility': round(volatility, 2),
-                            'price': p_close,
+                            'volatility': volatility,
+                            'price': price,
                             'direction': 'صعودی 📈' if change > 0 else 'نزولی 📉'
                         }
-                        results.append(item)
-                        self.add_card_to_ui(item)
-                        
-                time.sleep(0.02)
+                        results.append(card_data)
+                        self.add_card_to_ui(card_data)
+                except Exception:
+                    continue
                 
-            self.status_text.value = f"✅ پایان اسکن. {len(results)} نماد پیدا شد."
+            self.status_text.value = f"✅ پایان اسکن. {len(results)} نماد با تغییر بالای {self.min_change}% پیدا شد."
         except Exception as err:
-            self.status_text.value = f"❌ خطا: {err}"
+            self.status_text.value = f"❌ خطا در اتصال به اینترنت: {err}"
         finally:
             self.progress_bar.visible = False
             self.scan_btn.disabled = False
