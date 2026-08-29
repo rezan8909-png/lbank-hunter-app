@@ -1,0 +1,12 @@
+[project]
+name = "lbank_hunter"
+version = "1.0.0"
+description = "LBank Price Hunter App"
+dependencies = [
+    "flet",
+    "ccxt"
+]
+
+[tool.flet]
+org = "com.lbankhunter"
+product = "LBank Hunter"
