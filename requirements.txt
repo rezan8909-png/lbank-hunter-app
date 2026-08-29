@@ -1,0 +1,4 @@
+flet
+ccxt
+pandas
+numpy
